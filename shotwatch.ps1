@@ -70,11 +70,13 @@ if ([string]::IsNullOrWhiteSpace($WatchFolder)) {
 }
 if (-not (Test-Path $WatchFolder)) { New-Item -ItemType Directory -Path $WatchFolder -Force | Out-Null }
 
-# Seed: remember existing files so we never re-copy old shots.
-$seen = New-Object System.Collections.Generic.HashSet[string]
+# Seed: remember existing files (path -> last-write time) so we never re-copy old shots.
+# Tracking the timestamp (not just the name) means re-saving/overwriting the SAME file with new
+# annotations is treated as new — otherwise a same-name overwrite looks "already seen" and is missed.
+$seen = @{}
 Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
     Where-Object { $Extensions -contains $_.Extension } |
-    ForEach-Object { [void]$seen.Add($_.FullName) }
+    ForEach-Object { $seen[$_.FullName] = $_.LastWriteTimeUtc }
 
 function Test-GuardOpen {
     if ($GuardProcesses.Count -eq 0) { return $true }
@@ -150,8 +152,9 @@ while ($true) {
                  Where-Object { $Extensions -contains $_.Extension } |
                  Sort-Object CreationTime
         foreach ($f in $files) {
-            if (-not $seen.Contains($f.FullName)) {
-                [void]$seen.Add($f.FullName)
+            $prev = $seen[$f.FullName]
+            if ($null -eq $prev -or $f.LastWriteTimeUtc -gt $prev) {
+                $seen[$f.FullName] = $f.LastWriteTimeUtc
                 $guard = Test-GuardOpen
                 if ($guard) {
                     Wait-FileReady $f.FullName
