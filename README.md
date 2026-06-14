@@ -14,8 +14,12 @@ Win+PrtScn   ->   (path is now on your clipboard)   ->   Ctrl+V into your AI too
 Each screenshot gets its own path — nothing is overwritten, so you can paste several in a row.
 
 It keeps the **image on the clipboard too**, so the same screenshot still pastes as a picture
-into image apps (Blender, Photoshop, Discord…). Text targets get the path; image targets get the
-image — the receiving app picks the format, no mode switching.
+into image apps (Blender, Photoshop, Discord…). Text targets get the path; pure-image targets get
+the image — the receiving app picks the format, no mode switching.
+
+> Note: a surface that accepts *both* text and images (e.g. a browser search bar) will prefer the
+> **path**. If you want such places to paste the image instead, set `$ImageMode = 'always'` (image
+> only) — but then Claude/terminals can't read it. See the `$ImageMode` options in the script.
 
 ## Why it doesn't annoy you
 

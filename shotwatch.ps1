@@ -20,11 +20,43 @@ $WatchFolder = ''
 $Extensions   = @('.png', '.jpg', '.jpeg')
 $PollMs       = 500
 
+# What lands on the clipboard for each screenshot:
+#   'both'   = path text + image together. Claude/editors paste the PATH; pure image apps
+#              (Paint/Discord/Blender) paste the PICTURE. A surface that accepts both (browser
+#              search bar) prefers text. (recommended — Claude paste always works)
+#   'never'  = path text only — most reliable for terminal/editor paste.
+#   'always' = image only — best for browsers/search bars/image apps, but Claude can't read it.
+#   'smart'  = path text when a guard/IDE window is in front, image otherwise. Note: capturing
+#              another app to show Claude then fails, since that app is the foreground.
+$ImageMode    = 'both'
+
 # Write a diagnostic log next to this script (shotwatch.log). Flip to $true to troubleshoot.
 $DebugLog     = $false
 # ========================== END CONFIG =========================
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Fg {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int pid);
+}
+"@ | Out-Null
+
+# Name (no .exe) of the process owning the foreground window, or '' if unknown.
+function Get-ForegroundProc {
+    try {
+        $h = [Fg]::GetForegroundWindow()
+        $procId = 0
+        [void][Fg]::GetWindowThreadProcessId($h, [ref]$procId)
+        if ($procId -gt 0) {
+            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($p) { return $p.ProcessName }
+        }
+    } catch { }
+    return ''
+}
 
 $LogPath = Join-Path (Split-Path -Parent $PSCommandPath) 'shotwatch.log'
 function Log($msg) {
@@ -63,30 +95,35 @@ function Wait-FileReady($path) {
     }
 }
 
-# Put BOTH the image and its path text on the clipboard at once, and KEEP them there for ~2s.
-# A clipboard can hold multiple formats simultaneously: a text app (terminal/editor) pastes the
-# PATH, an image app (Blender/Photoshop/chat) pastes the IMAGE — the target picks the format.
+# Put the path text and/or the image on the clipboard and KEEP it there for ~2s. With $useText
+# on, a terminal/editor pastes the PATH; with $useImage on, a pure image app pastes the PICTURE.
+# (A surface that accepts BOTH, e.g. a browser search bar, prefers text when both are present.)
 # We re-assert because screenshot tools copy the image a beat after saving the file, and the
 # clipboard is a single shared lock another app can momentarily hold; either drops our write.
-# Stops early once a different value sticks (you deliberately copied something else).
-function Set-ClipboardSticky($path) {
-    # Build a combined image+text object once. Load the image from a memory copy so the file
-    # isn't locked. copy=$true flushes it to the OS clipboard so it survives this process.
+function Set-ClipboardSticky($path, $useImage, $useText) {
+    # Build the clipboard object once. copy=$true flushes it to the OS clipboard so it survives
+    # this process. Load the image from a memory copy so the file isn't locked.
     $data = New-Object System.Windows.Forms.DataObject
     $img = $null; $ms = $null
-    try {
-        $bytes = [System.IO.File]::ReadAllBytes($path)
-        $ms = New-Object System.IO.MemoryStream (,$bytes)
-        $img = [System.Drawing.Image]::FromStream($ms)
-        $data.SetImage($img)
-    } catch { }
-    $data.SetText($path)
+    if ($useImage) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $ms = New-Object System.IO.MemoryStream (,$bytes)
+            $img = [System.Drawing.Image]::FromStream($ms)
+            $data.SetImage($img)
+        } catch { $useText = $true }         # image load failed -> at least give the text
+    }
+    if ($useText) { $data.SetText($path) }
 
     $ours = 0; $confirmed = $false; $sets = 0; $lastErr = ''
     for ($i = 0; $i -lt 16; $i++) {
-        $cur = $null
-        try { $cur = [System.Windows.Forms.Clipboard]::GetText() } catch { $lastErr = $_.Exception.Message }
-        if ($cur -eq $path) {
+        $ok = $false
+        try {
+            # Verify on whichever format we own; text first since it's the exact value check.
+            if ($useText)       { $ok = ([System.Windows.Forms.Clipboard]::GetText() -eq $path) }
+            elseif ($useImage)  { $ok = [System.Windows.Forms.Clipboard]::ContainsImage() }
+        } catch { $lastErr = $_.Exception.Message }
+        if ($ok) {
             $ours++
             if ($ours -ge 4) { $confirmed = $true; break }   # held steady ~0.5s -> races are over
         } else {
@@ -98,7 +135,7 @@ function Set-ClipboardSticky($path) {
     }
     if ($img) { $img.Dispose() }
     if ($ms)  { $ms.Dispose() }
-    Log ("  set confirmed=$confirmed sets=$sets" + $(if ($lastErr) { " err=$lastErr" } else { '' }))
+    Log ("  set img=$useImage txt=$useText confirmed=$confirmed sets=$sets" + $(if ($lastErr) { " err=$lastErr" } else { '' }))
     return $confirmed
 }
 
@@ -116,10 +153,24 @@ while ($true) {
             if (-not $seen.Contains($f.FullName)) {
                 [void]$seen.Add($f.FullName)
                 $guard = Test-GuardOpen
-                Log ("NEW " + $f.Name + " guard=$guard")
                 if ($guard) {
                     Wait-FileReady $f.FullName
-                    Set-ClipboardSticky $f.FullName | Out-Null
+                    # Decide which formats to put on the clipboard:
+                    #   both  -> path + image (Claude pastes path, image apps paste picture)
+                    #   never -> path only        always -> image only
+                    #   smart -> path when a guard/IDE window is focused, image otherwise
+                    $fg = Get-ForegroundProc
+                    $useImage = $true; $useText = $true
+                    switch ($ImageMode) {
+                        'both'   { }
+                        'never'  { $useImage = $false }
+                        'always' { $useText  = $false }
+                        default  { if ($GuardProcesses -contains $fg) { $useImage = $false } else { $useText = $false } }
+                    }
+                    Log ("NEW " + $f.Name + " guard=$guard fg=$fg img=$useImage txt=$useText")
+                    Set-ClipboardSticky $f.FullName $useImage $useText | Out-Null
+                } else {
+                    Log ("NEW " + $f.Name + " guard=$guard (skipped)")
                 }
             }
         }
