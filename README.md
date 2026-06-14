@@ -13,6 +13,10 @@ Win+PrtScn   ->   (path is now on your clipboard)   ->   Ctrl+V into your AI too
 
 Each screenshot gets its own path — nothing is overwritten, so you can paste several in a row.
 
+It keeps the **image on the clipboard too**, so the same screenshot still pastes as a picture
+into image apps (Blender, Photoshop, Discord…). Text targets get the path; image targets get the
+image — the receiving app picks the format, no mode switching.
+
 ## Why it doesn't annoy you
 
 It only copies the path **while a "guard" app is running** (Rider by default), so it never touches

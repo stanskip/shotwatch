@@ -53,25 +53,40 @@ function Wait-FileReady($path) {
     }
 }
 
-# Put the path on the clipboard and KEEP it there for ~2s. Screenshot tools also copy the
-# IMAGE to the clipboard (a beat after saving the file), and the clipboard is a single shared
-# lock that can be momentarily held by another app — both cause our write to be lost. Re-asserting
-# until the clipboard actually reads back our value beats both races. Stops early once a different
-# value sticks (you deliberately copied something else).
-function Set-ClipboardSticky($value) {
+# Put BOTH the image and its path text on the clipboard at once, and KEEP them there for ~2s.
+# A clipboard can hold multiple formats simultaneously: a text app (terminal/editor) pastes the
+# PATH, an image app (Blender/Photoshop/chat) pastes the IMAGE — the target picks the format.
+# We re-assert because screenshot tools copy the image a beat after saving the file, and the
+# clipboard is a single shared lock another app can momentarily hold; either drops our write.
+# Stops early once a different value sticks (you deliberately copied something else).
+function Set-ClipboardSticky($path) {
+    # Build a combined image+text object once. Load the image from a memory copy so the file
+    # isn't locked. copy=$true flushes it to the OS clipboard so it survives this process.
+    $data = New-Object System.Windows.Forms.DataObject
+    $img = $null; $ms = $null
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $ms = New-Object System.IO.MemoryStream (,$bytes)
+        $img = [System.Drawing.Image]::FromStream($ms)
+        $data.SetImage($img)
+    } catch { }
+    $data.SetText($path)
+
     $ours = 0
     for ($i = 0; $i -lt 16; $i++) {
         $cur = $null
         try { $cur = [System.Windows.Forms.Clipboard]::GetText() } catch { }
-        if ($cur -eq $value) {
+        if ($cur -eq $path) {
             $ours++
-            if ($ours -ge 4) { return }          # held steady ~0.5s -> the races are over
+            if ($ours -ge 4) { break }            # held steady ~0.5s -> the races are over
         } else {
             $ours = 0
-            try { [System.Windows.Forms.Clipboard]::SetText($value) } catch { }
+            try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true) } catch { }
         }
         Start-Sleep -Milliseconds 130
     }
+    if ($img) { $img.Dispose() }
+    if ($ms)  { $ms.Dispose() }
 }
 
 while ($true) {
