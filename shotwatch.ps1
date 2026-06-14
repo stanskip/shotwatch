@@ -19,9 +19,19 @@ $WatchFolder = ''
 # Image extensions to react to, and how often to poll (ms).
 $Extensions   = @('.png', '.jpg', '.jpeg')
 $PollMs       = 500
+
+# Write a diagnostic log next to this script (shotwatch.log). Flip to $true to troubleshoot.
+$DebugLog     = $false
 # ========================== END CONFIG =========================
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
+
+$LogPath = Join-Path (Split-Path -Parent $PSCommandPath) 'shotwatch.log'
+function Log($msg) {
+    if (-not $DebugLog) { return }
+    try { Add-Content -Path $LogPath -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $msg) -ErrorAction SilentlyContinue } catch { }
+}
+Log "=== shotwatch started (pid $PID) ==="
 
 if ([string]::IsNullOrWhiteSpace($WatchFolder)) {
     $WatchFolder = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Screenshots'
@@ -72,37 +82,52 @@ function Set-ClipboardSticky($path) {
     } catch { }
     $data.SetText($path)
 
-    $ours = 0
+    $ours = 0; $confirmed = $false; $sets = 0; $lastErr = ''
     for ($i = 0; $i -lt 16; $i++) {
         $cur = $null
-        try { $cur = [System.Windows.Forms.Clipboard]::GetText() } catch { }
+        try { $cur = [System.Windows.Forms.Clipboard]::GetText() } catch { $lastErr = $_.Exception.Message }
         if ($cur -eq $path) {
             $ours++
-            if ($ours -ge 4) { break }            # held steady ~0.5s -> the races are over
+            if ($ours -ge 4) { $confirmed = $true; break }   # held steady ~0.5s -> races are over
         } else {
             $ours = 0
-            try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true) } catch { }
+            $sets++
+            try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true) } catch { $lastErr = $_.Exception.Message }
         }
         Start-Sleep -Milliseconds 130
     }
     if ($img) { $img.Dispose() }
     if ($ms)  { $ms.Dispose() }
+    Log ("  set confirmed=$confirmed sets=$sets" + $(if ($lastErr) { " err=$lastErr" } else { '' }))
+    return $confirmed
 }
 
+$tick = 0
 while ($true) {
     try {
+        # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
+        # STA thread (without this, clipboard ops can go stale after the process sits idle).
+        [System.Windows.Forms.Application]::DoEvents()
+
         $files = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
                  Where-Object { $Extensions -contains $_.Extension } |
                  Sort-Object CreationTime
         foreach ($f in $files) {
             if (-not $seen.Contains($f.FullName)) {
                 [void]$seen.Add($f.FullName)
-                if (Test-GuardOpen) {
+                $guard = Test-GuardOpen
+                Log ("NEW " + $f.Name + " guard=$guard")
+                if ($guard) {
                     Wait-FileReady $f.FullName
-                    Set-ClipboardSticky $f.FullName
+                    Set-ClipboardSticky $f.FullName | Out-Null
                 }
             }
         }
-    } catch { }
+    } catch { Log ("LOOP-ERR " + $_.Exception.Message) }
+
+    # Heartbeat every ~60s. A gap much larger than 60s between heartbeats = the process was
+    # suspended/throttled while idle (which would explain a missed first-shot-after-idle).
+    $tick++
+    if ($tick -ge [int](60000 / $PollMs)) { $tick = 0; Log "heartbeat" }
     Start-Sleep -Milliseconds $PollMs
 }
