@@ -53,6 +53,27 @@ function Wait-FileReady($path) {
     }
 }
 
+# Put the path on the clipboard and KEEP it there for ~2s. Screenshot tools also copy the
+# IMAGE to the clipboard (a beat after saving the file), and the clipboard is a single shared
+# lock that can be momentarily held by another app — both cause our write to be lost. Re-asserting
+# until the clipboard actually reads back our value beats both races. Stops early once a different
+# value sticks (you deliberately copied something else).
+function Set-ClipboardSticky($value) {
+    $ours = 0
+    for ($i = 0; $i -lt 16; $i++) {
+        $cur = $null
+        try { $cur = [System.Windows.Forms.Clipboard]::GetText() } catch { }
+        if ($cur -eq $value) {
+            $ours++
+            if ($ours -ge 4) { return }          # held steady ~0.5s -> the races are over
+        } else {
+            $ours = 0
+            try { [System.Windows.Forms.Clipboard]::SetText($value) } catch { }
+        }
+        Start-Sleep -Milliseconds 130
+    }
+}
+
 while ($true) {
     try {
         $files = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
@@ -63,7 +84,7 @@ while ($true) {
                 [void]$seen.Add($f.FullName)
                 if (Test-GuardOpen) {
                     Wait-FileReady $f.FullName
-                    Set-Clipboard -Value $f.FullName
+                    Set-ClipboardSticky $f.FullName
                 }
             }
         }
