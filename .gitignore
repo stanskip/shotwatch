@@ -1,0 +1,4 @@
+# nothing to build; keep the repo clean
+*.log
+.DS_Store
+Thumbs.db
