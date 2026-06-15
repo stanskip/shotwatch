@@ -1,9 +1,28 @@
-# shotwatch.ps1 — auto-copy each new screenshot's file PATH to the clipboard, so you can
-# paste it into a terminal-based AI tool (Claude Code, aider, Cursor CLI...) that can't take
-# pasted images. Watches the Windows Screenshots folder; on a new image it copies that file's
-# full path as TEXT. Each screenshot = its own path (nothing is overwritten).
+# shotwatch.ps1 — auto-put each new screenshot's file PATH on the clipboard, so you can paste it
+# into a terminal AI tool (Claude Code, aider, Cursor CLI...) that can't accept a pasted image.
+# Take a screenshot, then Ctrl+V the path into the tool. Runs hidden; shotwatch-run.ps1 supervises
+# it and relaunches if it ever dies. See README.md for install/uninstall.
 #
-# Runs hidden in the background. See README.md for install/uninstall.
+# ───────────────────────── HOW IT WORKS ─────────────────────────
+# A poll loop (every $PollMs) does two checks, then puts the path (and/or image — see $ImageMode)
+# on the clipboard via Set-ClipboardSticky:
+#   1. FOLDER WATCH  — a new or re-saved file in the Screenshots folder (covers Win+PrtScn and
+#                      "annotate -> Save"). Detects re-saves by tracking last-write time, not name.
+#   2. CLIPBOARD WATCH — an image freshly COPIED with no file (covers "annotate -> Copy"). Saves it
+#                      as clip_<time>.png, then hands off the path. Gated on the Win32 clipboard
+#                      sequence number so we only decode when the clipboard actually changed.
+#
+# Why the guards exist (each maps to a real bug found the hard way):
+#   $seen        path -> last-write time. New/changed files fire; unchanged ones don't.
+#   $ownClips    clip_*.png WE saved — the folder watch must skip them (else double-processing).
+#   $hashToPath  pixel-hash -> our clip path. A re-copy (Snipping Tool's Copy re-puts the RAW image)
+#                must RE-ASSERT the existing path, not be ignored — else the raw image sits on the
+#                clipboard and a terminal pastes nothing.
+#   $placedHash  pixel-hash of an image WE placed (image modes only) — so our own put isn't mistaken
+#                for a user copy and reprocessed in a loop.
+# Pixel-hash (Get-BitmapHash), not PNG bytes, because re-encoding isn't deterministic.
+# Set-ClipboardSticky re-asserts for ~2s: screenshot tools copy the image a beat late and the
+# clipboard is a single shared lock another app can momentarily hold; either would drop our write.
 
 # ============================ CONFIG ============================
 # Only copy while one of these processes is running, so it never hijacks your clipboard
