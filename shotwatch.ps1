@@ -9,8 +9,8 @@
 #   1. FOLDER WATCH  — a new or re-saved file in the Screenshots folder (covers Win+PrtScn and
 #                      "annotate -> Save"). Detects re-saves by tracking last-write time, not name.
 #   2. CLIPBOARD WATCH — an image freshly COPIED with no file (covers "annotate -> Copy"). Saves it
-#                      as clip_<time>.png, then hands off the path. Gated on the Win32 clipboard
-#                      sequence number so we only decode when the clipboard actually changed.
+#                      as clip_<time>.png, then hands off the path. Driven by a real clipboard EVENT
+#                      listener (ClipWatcher / WM_CLIPBOARDUPDATE), so it reacts with no poll lag.
 #
 # Why the guards exist (each maps to a real bug found the hard way):
 #   $seen        path -> last-write time. New/changed files fire; unchanged ones don't.
@@ -77,6 +77,35 @@ public static class Fg {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int pid);
     [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+}
+"@ | Out-Null
+
+# Real clipboard EVENT listener (vs. polling the sequence number): a message-only window that
+# Windows notifies on every clipboard change via WM_CLIPBOARDUPDATE. We just count changes; the
+# loop reacts the moment a change is dispatched (DoEvents), so there's no poll latency.
+Add-Type -ReferencedAssemblies 'System.Windows.Forms' @"
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+public class ClipWatcher : NativeWindow, IDisposable {
+    const int WM_CLIPBOARDUPDATE = 0x031D;
+    [DllImport("user32.dll")] static extern bool AddClipboardFormatListener(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+    public int Changes = 0;
+    public ClipWatcher() {
+        CreateParams cp = new CreateParams();
+        cp.Parent = (IntPtr)(-3); // HWND_MESSAGE — a message-only window
+        this.CreateHandle(cp);
+        AddClipboardFormatListener(this.Handle);
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == WM_CLIPBOARDUPDATE) { Changes++; }
+        base.WndProc(ref m);
+    }
+    public void Dispose() {
+        try { RemoveClipboardFormatListener(this.Handle); } catch {}
+        this.DestroyHandle();
+    }
 }
 "@ | Out-Null
 
@@ -224,43 +253,52 @@ function Get-ClipImageHash {
     } catch { return '' }
 }
 
-$tick = 0
 $placedHash = ''    # pixel-hash of the image WE put on the clipboard (only in image modes), to ignore our echo
-$lastClipSeq = [Fg]::GetClipboardSequenceNumber()
 $ownClips = New-Object System.Collections.Generic.HashSet[string]   # clip_*.png we created ourselves
 $hashToPath = @{}   # pixel-hash -> clip file we already saved for it (so a re-copy re-asserts the path)
+
+$clip = New-Object ClipWatcher        # clipboard EVENT listener (no polling)
+$lastChanges = $clip.Changes
+
+# Event-driven loop: a short pump tick keeps WM_CLIPBOARDUPDATE flowing to the listener (so the
+# clipboard reaction is ~instant), while the folder is scanned on a slower cadence (files aren't
+# latency-critical — you paste them later). $PollMs is now the folder cadence.
+$LoopMs   = 40
+$folderMs = $PollMs
+$folderAccum = $folderMs    # force an initial folder scan
+$hbAccum = 0
 while ($true) {
     try {
-        # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
-        # STA thread (without this, clipboard ops can go stale after the process sits idle).
+        # Pump messages: dispatches WM_CLIPBOARDUPDATE to the listener AND keeps OLE clipboard healthy.
         [System.Windows.Forms.Application]::DoEvents()
 
-        $files = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
-                 Where-Object { $Extensions -contains $_.Extension } |
-                 Sort-Object CreationTime
-        foreach ($f in $files) {
-            if ($ownClips.Contains($f.FullName)) { continue }   # our own clip_*.png — already handled
-            $prev = $seen[$f.FullName]
-            if ($null -eq $prev -or $f.LastWriteTimeUtc -gt $prev) {
-                $seen[$f.FullName] = $f.LastWriteTimeUtc
-                if (Test-GuardOpen) {
-                    Wait-FileReady $f.FullName
-                    $fmt = Get-Formats
-                    Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
-                    Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
-                    $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
-                } else {
-                    Log ("NEW " + $f.Name + " (skipped, guard closed)")
+        # --- Folder watch (new or re-saved screenshot file) — on $folderMs cadence ---
+        $folderAccum += $LoopMs
+        if ($folderAccum -ge $folderMs) {
+            $folderAccum = 0
+            $files = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
+                     Where-Object { $Extensions -contains $_.Extension } |
+                     Sort-Object CreationTime
+            foreach ($f in $files) {
+                if ($ownClips.Contains($f.FullName)) { continue }   # our own clip_*.png — already handled
+                $prev = $seen[$f.FullName]
+                if ($null -eq $prev -or $f.LastWriteTimeUtc -gt $prev) {
+                    $seen[$f.FullName] = $f.LastWriteTimeUtc
+                    if (Test-GuardOpen) {
+                        Wait-FileReady $f.FullName
+                        $fmt = Get-Formats
+                        Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
+                        Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
+                        $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
+                    } else {
+                        Log ("NEW " + $f.Name + " (skipped, guard closed)")
+                    }
                 }
             }
         }
 
-        # --- Clipboard watch: catch annotate-then-Copy (image copied, no file written) ---
-        # Only inspect the clipboard when its sequence number changed (cheap), so we don't decode
-        # the image every poll.
-        $seq = [Fg]::GetClipboardSequenceNumber()
-        if ($WatchClipboard -and $seq -ne $lastClipSeq) {
-            $lastClipSeq = $seq
+        # --- Clipboard watch (annotate-then-Copy) — fires the instant the listener sees a change ---
+        if ($WatchClipboard -and $clip.Changes -ne $lastChanges) {
             if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
                 $cimg = [System.Windows.Forms.Clipboard]::GetImage()
                 if ($cimg) {
@@ -271,18 +309,16 @@ while ($true) {
                     if ($chash -ne '' -and $chash -ne $placedHash -and (Test-GuardOpen)) {
                         $path = $null
                         if ($hashToPath.ContainsKey($chash) -and (Test-Path $hashToPath[$chash])) {
-                            # Same image we already saved -> just re-assert its path (no new file).
                             $path = $hashToPath[$chash]
                             Log ("RECLIP $([System.IO.Path]::GetFileName($path))")
                         } else {
-                            # New copied image with no backing file -> save it.
                             $cms = New-Object System.IO.MemoryStream
                             $cimg.Save($cms, [System.Drawing.Imaging.ImageFormat]::Png)
                             $cbytes = $cms.ToArray(); $cms.Dispose()
                             $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
                             $path = Join-Path $WatchFolder ("clip_$stamp.png")
                             [System.IO.File]::WriteAllBytes($path, $cbytes)
-                            [void]$ownClips.Add($path)                     # folder watch must never re-process it
+                            [void]$ownClips.Add($path)
                             $seen[$path] = (Get-Item $path).LastWriteTimeUtc
                             $hashToPath[$chash] = $path
                             Log ("CLIP saved $([System.IO.Path]::GetFileName($path))")
@@ -296,12 +332,12 @@ while ($true) {
                     $cimg.Dispose()
                 }
             }
+            $lastChanges = $clip.Changes   # absorb our own clipboard writes from processing above
         }
     } catch { Log ("LOOP-ERR " + $_.Exception.Message) }
 
-    # Heartbeat every ~60s. A gap much larger than 60s between heartbeats = the process was
-    # suspended/throttled while idle (which would explain a missed first-shot-after-idle).
-    $tick++
-    if ($tick -ge [int](60000 / $PollMs)) { $tick = 0; Log "heartbeat" }
-    Start-Sleep -Milliseconds $PollMs
+    # Heartbeat every ~60s (gap >> 60s between them = the process was suspended while idle).
+    $hbAccum += $LoopMs
+    if ($hbAccum -ge 60000) { $hbAccum = 0; Log "heartbeat" }
+    Start-Sleep -Milliseconds $LoopMs
 }
