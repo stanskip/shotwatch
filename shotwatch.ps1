@@ -16,9 +16,10 @@ $GuardProcesses = @('rider64')
 # Folder to watch. Empty = auto-detect the Windows Screenshots folder (handles OneDrive redirect).
 $WatchFolder = ''
 
-# Image extensions to react to, and how often to poll (ms).
+# Image extensions to react to, and how often to poll (ms). Lower = the path replaces a copied
+# image faster, so a quick copy-then-paste doesn't beat it to the clipboard.
 $Extensions   = @('.png', '.jpg', '.jpeg')
-$PollMs       = 500
+$PollMs       = 200
 
 # What lands on the clipboard for each screenshot:
 #   'both'   = path text + image together. Claude/editors paste the PATH; pure image apps
