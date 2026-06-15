@@ -162,8 +162,34 @@ function Set-ClipboardSticky($path, $useImage, $useText) {
     return $confirmed
 }
 
+# Hash a bitmap by its raw PIXELS (deterministic — unlike re-encoding to PNG), so we can reliably
+# tell "an image WE just placed on the clipboard" from "a new image the user copied".
+function Get-BitmapHash($bmp) {
+    try {
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
+        $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $len = [Math]::Abs($data.Stride) * $bmp.Height
+        $buf = New-Object byte[] $len
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $len)
+        $bmp.UnlockBits($data)
+        return ("{0}x{1}:" -f $bmp.Width, $bmp.Height) + [System.BitConverter]::ToString($md5.ComputeHash($buf))
+    } catch { return '' }
+}
+# Pixel-hash of whatever image is on the clipboard right now (or '' if none).
+function Get-ClipImageHash {
+    try {
+        if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) { return '' }
+        $i = [System.Windows.Forms.Clipboard]::GetImage()
+        if (-not $i) { return '' }
+        $h = Get-BitmapHash $i
+        $i.Dispose()
+        return $h
+    } catch { return '' }
+}
+
 $tick = 0
 $lastClipHash = ''
+$placedHash = ''    # pixel-hash of the image WE last put on the clipboard (to ignore our own echo)
 $lastClipSeq = [Fg]::GetClipboardSequenceNumber()
 $ownClips = New-Object System.Collections.Generic.HashSet[string]   # clip_*.png we created ourselves
 while ($true) {
@@ -185,6 +211,7 @@ while ($true) {
                     $fmt = Get-Formats
                     Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
                     Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
+                    if ($fmt.img) { $placedHash = Get-ClipImageHash }   # remember our own image
                 } else {
                     Log ("NEW " + $f.Name + " (skipped, guard closed)")
                 }
@@ -198,32 +225,31 @@ while ($true) {
         if ($WatchClipboard -and $seq -ne $lastClipSeq) {
             $lastClipSeq = $seq
             if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
-            $cimg = [System.Windows.Forms.Clipboard]::GetImage()
-            if ($cimg) {
-                $cms = New-Object System.IO.MemoryStream
-                $cimg.Save($cms, [System.Drawing.Imaging.ImageFormat]::Png)
-                $cbytes = $cms.ToArray(); $cms.Dispose(); $cimg.Dispose()
-                $chash = [System.BitConverter]::ToString($md5.ComputeHash($cbytes))
-                if ($chash -ne $lastClipHash) {
-                    $lastClipHash = $chash
-                    # If a screenshot file landed in the last few seconds, the folder watch owns this
-                    # image (a fresh snip both saves a file and copies the image) — don't duplicate it.
-                    $cutoff = (Get-Date).ToUniversalTime().AddSeconds(-4)
-                    $recent = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
-                              Where-Object { $Extensions -contains $_.Extension -and $_.LastWriteTimeUtc -ge $cutoff }
-                    if (-not $recent -and (Test-GuardOpen)) {
-                        # A copied image with no backing file -> save it ourselves, then hand off the path.
-                        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-                        $path = Join-Path $WatchFolder ("clip_$stamp.png")
-                        [System.IO.File]::WriteAllBytes($path, $cbytes)
-                        [void]$ownClips.Add($path)                         # folder watch must never re-process it
-                        $seen[$path] = (Get-Item $path).LastWriteTimeUtc
-                        $fmt = Get-Formats
-                        Log ("CLIP saved $([System.IO.Path]::GetFileName($path)) fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
-                        Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
+                $cimg = [System.Windows.Forms.Clipboard]::GetImage()
+                if ($cimg) {
+                    $chash = Get-BitmapHash $cimg
+                    # Act only when this is a genuinely new image AND not one we placed ourselves
+                    # (echo of our own put). Pixel-hash makes that distinction reliable, so editing
+                    # and copying again is always seen as new.
+                    if ($chash -ne '' -and $chash -ne $lastClipHash -and $chash -ne $placedHash) {
+                        $lastClipHash = $chash
+                        if (Test-GuardOpen) {
+                            $cms = New-Object System.IO.MemoryStream
+                            $cimg.Save($cms, [System.Drawing.Imaging.ImageFormat]::Png)
+                            $cbytes = $cms.ToArray(); $cms.Dispose()
+                            $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+                            $path = Join-Path $WatchFolder ("clip_$stamp.png")
+                            [System.IO.File]::WriteAllBytes($path, $cbytes)
+                            [void]$ownClips.Add($path)                     # folder watch must never re-process it
+                            $seen[$path] = (Get-Item $path).LastWriteTimeUtc
+                            $fmt = Get-Formats
+                            Log ("CLIP saved $([System.IO.Path]::GetFileName($path)) fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
+                            Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
+                            $placedHash = if ($fmt.img) { Get-ClipImageHash } else { $chash }
+                        }
                     }
+                    $cimg.Dispose()
                 }
-            }
             }
         }
     } catch { Log ("LOOP-ERR " + $_.Exception.Message) }
