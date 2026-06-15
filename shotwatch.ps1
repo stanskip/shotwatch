@@ -206,10 +206,10 @@ function Get-ClipImageHash {
 }
 
 $tick = 0
-$lastClipHash = ''
-$placedHash = ''    # pixel-hash of the image WE last put on the clipboard (to ignore our own echo)
+$placedHash = ''    # pixel-hash of the image WE put on the clipboard (only in image modes), to ignore our echo
 $lastClipSeq = [Fg]::GetClipboardSequenceNumber()
 $ownClips = New-Object System.Collections.Generic.HashSet[string]   # clip_*.png we created ourselves
+$hashToPath = @{}   # pixel-hash -> clip file we already saved for it (so a re-copy re-asserts the path)
 while ($true) {
     try {
         # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
@@ -229,7 +229,7 @@ while ($true) {
                     $fmt = Get-Formats
                     Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
                     Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
-                    if ($fmt.img) { $placedHash = Get-ClipImageHash }   # remember our own image
+                    $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
                 } else {
                     Log ("NEW " + $f.Name + " (skipped, guard closed)")
                 }
@@ -246,12 +246,17 @@ while ($true) {
                 $cimg = [System.Windows.Forms.Clipboard]::GetImage()
                 if ($cimg) {
                     $chash = Get-BitmapHash $cimg
-                    # Act only when this is a genuinely new image AND not one we placed ourselves
-                    # (echo of our own put). Pixel-hash makes that distinction reliable, so editing
-                    # and copying again is always seen as new.
-                    if ($chash -ne '' -and $chash -ne $lastClipHash -and $chash -ne $placedHash) {
-                        $lastClipHash = $chash
-                        if (Test-GuardOpen) {
+                    # Ignore the echo of an image WE placed (image modes only). Otherwise an image on
+                    # the clipboard is the user's copy — make sure the PATH ends up there, even if it's
+                    # a re-copy of an image we've already captured (a re-copy puts the raw image back).
+                    if ($chash -ne '' -and $chash -ne $placedHash -and (Test-GuardOpen)) {
+                        $path = $null
+                        if ($hashToPath.ContainsKey($chash) -and (Test-Path $hashToPath[$chash])) {
+                            # Same image we already saved -> just re-assert its path (no new file).
+                            $path = $hashToPath[$chash]
+                            Log ("RECLIP $([System.IO.Path]::GetFileName($path))")
+                        } else {
+                            # New copied image with no backing file -> save it.
                             $cms = New-Object System.IO.MemoryStream
                             $cimg.Save($cms, [System.Drawing.Imaging.ImageFormat]::Png)
                             $cbytes = $cms.ToArray(); $cms.Dispose()
@@ -260,10 +265,13 @@ while ($true) {
                             [System.IO.File]::WriteAllBytes($path, $cbytes)
                             [void]$ownClips.Add($path)                     # folder watch must never re-process it
                             $seen[$path] = (Get-Item $path).LastWriteTimeUtc
+                            $hashToPath[$chash] = $path
+                            Log ("CLIP saved $([System.IO.Path]::GetFileName($path))")
+                        }
+                        if ($path) {
                             $fmt = Get-Formats
-                            Log ("CLIP saved $([System.IO.Path]::GetFileName($path)) fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
                             Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
-                            $placedHash = if ($fmt.img) { Get-ClipImageHash } else { $chash }
+                            $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
                         }
                     }
                     $cimg.Dispose()
