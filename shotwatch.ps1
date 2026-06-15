@@ -28,12 +28,20 @@ $PollMs       = 500
 #   'always' = image only — best for browsers/search bars/image apps, but Claude can't read it.
 #   'smart'  = path text when a guard/IDE window is in front, image otherwise. Note: capturing
 #              another app to show Claude then fails, since that app is the foreground.
-$ImageMode    = 'both'
+# Default 'never': an image on the clipboard makes terminals (Rider/Claude) intermittently paste
+# NOTHING instead of the path. Text-only is rock-solid for pasting into Claude — which is the point.
+# The screenshot is still saved as a file you can drag into image apps. Flip to 'both'/'always' if
+# you'd rather paste the picture (and accept flaky terminal paste).
+$ImageMode    = 'never'
 
 # Also watch the CLIPBOARD for images (so "annotate in Snipping Tool, then hit Copy" works even
 # though no file is saved). When a freshly copied image appears that isn't already a recent file,
 # shotwatch saves it to the watch folder itself and hands you the path. $false = folder only.
 $WatchClipboard = $true
+
+# Auto-delete shotwatch's own clip_*.png after this many days (they pile up from Copy captures).
+# 0 = keep forever. Only ever touches files named clip_* that shotwatch created.
+$ClipKeepDays = 1
 
 # Write a diagnostic log next to this script (shotwatch.log). Flip to $true to troubleshoot.
 $DebugLog     = $false
@@ -77,6 +85,15 @@ if ([string]::IsNullOrWhiteSpace($WatchFolder)) {
     $WatchFolder = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Screenshots'
 }
 if (-not (Test-Path $WatchFolder)) { New-Item -ItemType Directory -Path $WatchFolder -Force | Out-Null }
+
+# Tidy up: delete auto-saved clip_*.png older than $ClipKeepDays (they accumulate from Copy captures).
+# 0 = keep forever. Only touches files shotwatch itself created (clip_ prefix), never your own shots.
+if ($ClipKeepDays -gt 0) {
+    $cutoff = (Get-Date).AddDays(-$ClipKeepDays)
+    Get-ChildItem -Path $WatchFolder -Filter 'clip_*.png' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        ForEach-Object { try { Remove-Item $_.FullName -Force } catch {} }
+}
 
 # Seed: remember existing files (path -> last-write time) so we never re-copy old shots.
 # Tracking the timestamp (not just the name) means re-saving/overwriting the SAME file with new
