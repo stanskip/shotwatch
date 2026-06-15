@@ -165,6 +165,7 @@ function Set-ClipboardSticky($path, $useImage, $useText) {
 $tick = 0
 $lastClipHash = ''
 $lastClipSeq = [Fg]::GetClipboardSequenceNumber()
+$ownClips = New-Object System.Collections.Generic.HashSet[string]   # clip_*.png we created ourselves
 while ($true) {
     try {
         # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
@@ -175,6 +176,7 @@ while ($true) {
                  Where-Object { $Extensions -contains $_.Extension } |
                  Sort-Object CreationTime
         foreach ($f in $files) {
+            if ($ownClips.Contains($f.FullName)) { continue }   # our own clip_*.png — already handled
             $prev = $seen[$f.FullName]
             if ($null -eq $prev -or $f.LastWriteTimeUtc -gt $prev) {
                 $seen[$f.FullName] = $f.LastWriteTimeUtc
@@ -214,7 +216,8 @@ while ($true) {
                         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
                         $path = Join-Path $WatchFolder ("clip_$stamp.png")
                         [System.IO.File]::WriteAllBytes($path, $cbytes)
-                        $seen[$path] = (Get-Item $path).LastWriteTimeUtc   # so the folder watch skips it
+                        [void]$ownClips.Add($path)                         # folder watch must never re-process it
+                        $seen[$path] = (Get-Item $path).LastWriteTimeUtc
                         $fmt = Get-Formats
                         Log ("CLIP saved $([System.IO.Path]::GetFileName($path)) fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
                         Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
