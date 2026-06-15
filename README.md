@@ -46,8 +46,13 @@ Edit the **CONFIG** block at the top of `shotwatch.ps1`, then re-run `install.ps
 - `$WatchFolder` — empty = auto-detect the Windows Screenshots folder (handles OneDrive). Or set a path.
 - `$Extensions`, `$PollMs` — what to watch for and how often.
 
-> Tip: `Win+PrtScn` saves to the Screenshots folder. `Win+Shift+S` (Snip) copies to the clipboard
-> but does **not** save a file — set Snip to auto-save, or just use `Win+PrtScn`.
+> Tip: `Win+PrtScn` saves to the Screenshots folder. `Win+Shift+S` (Snip) copies to the clipboard.
+
+### Annotate → Copy
+
+If you snip, mark it up in the Snipping Tool, and hit **Copy** (no Save), shotwatch still works:
+with `$WatchClipboard = $true` (default) it notices the freshly copied image, saves it to the watch
+folder itself, and hands you the path. So **Copy and Save both work** — no need to remember to save.
 
 ## Uninstall
 

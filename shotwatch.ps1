@@ -30,17 +30,25 @@ $PollMs       = 500
 #              another app to show Claude then fails, since that app is the foreground.
 $ImageMode    = 'both'
 
+# Also watch the CLIPBOARD for images (so "annotate in Snipping Tool, then hit Copy" works even
+# though no file is saved). When a freshly copied image appears that isn't already a recent file,
+# shotwatch saves it to the watch folder itself and hands you the path. $false = folder only.
+$WatchClipboard = $true
+
 # Write a diagnostic log next to this script (shotwatch.log). Flip to $true to troubleshoot.
 $DebugLog     = $false
 # ========================== END CONFIG =========================
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
+$md5 = [System.Security.Cryptography.MD5]::Create()
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class Fg {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int pid);
+    [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
 }
 "@ | Out-Null
 
@@ -84,6 +92,19 @@ function Test-GuardOpen {
         if (Get-Process -Name $p -ErrorAction SilentlyContinue) { return $true }
     }
     return $false
+}
+
+# Decide which clipboard formats to use for this capture, based on $ImageMode + foreground window.
+function Get-Formats {
+    $fg = Get-ForegroundProc
+    $useImage = $true; $useText = $true
+    switch ($ImageMode) {
+        'both'   { }
+        'never'  { $useImage = $false }
+        'always' { $useText  = $false }
+        default  { if ($GuardProcesses -contains $fg) { $useImage = $false } else { $useText = $false } }
+    }
+    return @{ fg = $fg; img = $useImage; txt = $useText }
 }
 
 # Wait until the file stops growing (screenshot finished writing).
@@ -142,6 +163,8 @@ function Set-ClipboardSticky($path, $useImage, $useText) {
 }
 
 $tick = 0
+$lastClipHash = ''
+$lastClipSeq = [Fg]::GetClipboardSequenceNumber()
 while ($true) {
     try {
         # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
@@ -155,26 +178,49 @@ while ($true) {
             $prev = $seen[$f.FullName]
             if ($null -eq $prev -or $f.LastWriteTimeUtc -gt $prev) {
                 $seen[$f.FullName] = $f.LastWriteTimeUtc
-                $guard = Test-GuardOpen
-                if ($guard) {
+                if (Test-GuardOpen) {
                     Wait-FileReady $f.FullName
-                    # Decide which formats to put on the clipboard:
-                    #   both  -> path + image (Claude pastes path, image apps paste picture)
-                    #   never -> path only        always -> image only
-                    #   smart -> path when a guard/IDE window is focused, image otherwise
-                    $fg = Get-ForegroundProc
-                    $useImage = $true; $useText = $true
-                    switch ($ImageMode) {
-                        'both'   { }
-                        'never'  { $useImage = $false }
-                        'always' { $useText  = $false }
-                        default  { if ($GuardProcesses -contains $fg) { $useImage = $false } else { $useText = $false } }
-                    }
-                    Log ("NEW " + $f.Name + " guard=$guard fg=$fg img=$useImage txt=$useText")
-                    Set-ClipboardSticky $f.FullName $useImage $useText | Out-Null
+                    $fmt = Get-Formats
+                    Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
+                    Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
                 } else {
-                    Log ("NEW " + $f.Name + " guard=$guard (skipped)")
+                    Log ("NEW " + $f.Name + " (skipped, guard closed)")
                 }
+            }
+        }
+
+        # --- Clipboard watch: catch annotate-then-Copy (image copied, no file written) ---
+        # Only inspect the clipboard when its sequence number changed (cheap), so we don't decode
+        # the image every poll.
+        $seq = [Fg]::GetClipboardSequenceNumber()
+        if ($WatchClipboard -and $seq -ne $lastClipSeq) {
+            $lastClipSeq = $seq
+            if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+            $cimg = [System.Windows.Forms.Clipboard]::GetImage()
+            if ($cimg) {
+                $cms = New-Object System.IO.MemoryStream
+                $cimg.Save($cms, [System.Drawing.Imaging.ImageFormat]::Png)
+                $cbytes = $cms.ToArray(); $cms.Dispose(); $cimg.Dispose()
+                $chash = [System.BitConverter]::ToString($md5.ComputeHash($cbytes))
+                if ($chash -ne $lastClipHash) {
+                    $lastClipHash = $chash
+                    # If a screenshot file landed in the last few seconds, the folder watch owns this
+                    # image (a fresh snip both saves a file and copies the image) — don't duplicate it.
+                    $cutoff = (Get-Date).ToUniversalTime().AddSeconds(-4)
+                    $recent = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
+                              Where-Object { $Extensions -contains $_.Extension -and $_.LastWriteTimeUtc -ge $cutoff }
+                    if (-not $recent -and (Test-GuardOpen)) {
+                        # A copied image with no backing file -> save it ourselves, then hand off the path.
+                        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                        $path = Join-Path $WatchFolder ("clip_$stamp.png")
+                        [System.IO.File]::WriteAllBytes($path, $cbytes)
+                        $seen[$path] = (Get-Item $path).LastWriteTimeUtc   # so the folder watch skips it
+                        $fmt = Get-Formats
+                        Log ("CLIP saved $([System.IO.Path]::GetFileName($path)) fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
+                        Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
+                    }
+                }
+            }
             }
         }
     } catch { Log ("LOOP-ERR " + $_.Exception.Message) }
