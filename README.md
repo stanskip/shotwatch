@@ -3,31 +3,25 @@
 **Take a screenshot, then just paste it into Claude (or any terminal AI tool) — it Just Works.**
 
 Terminal-based AI tools (Claude Code, aider, Cursor CLI…) and JetBrains' built-in terminal **can't
-take a pasted image**. They only take text. shotwatch bridges that gap automatically: when you take
+take a pasted image** — they only take text. shotwatch bridges that gap automatically: when you take
 a screenshot, it puts the screenshot's **file path** on your clipboard. You press `Ctrl+V`, the tool
-reads the file. Done — no saving paths by hand, no extra steps.
+reads the file from disk. Done — no saving paths by hand, no extra steps.
 
 ```
 Take a screenshot   →   (path is already on your clipboard)   →   Ctrl+V into Claude
 ```
 
-It also keeps the **image** on the clipboard, so the *same* screenshot still pastes as a picture
-into image apps (Paint, Discord, Blender…). The app you paste into decides which it grabs:
-
-| Where you paste | What you get |
-| --- | --- |
-| Claude / terminal / text box | the **path** |
-| Paint / Discord / image slot | the **image** |
-| Browser search bar (takes both) | the **path** *(see `$ImageMode` to change this)* |
+Each screenshot gets its own path — nothing is overwritten, so you can paste several in a row.
 
 ## Everything it handles
 
-- **Plain screenshot** → path on clipboard.
+- **Plain screenshot** (`Win+PrtScn`) → path on the clipboard.
 - **Annotate then Save** (Snipping Tool markup → Save) → path to the marked-up file.
 - **Annotate then Copy** (markup → Copy, *no save*) → it saves the copied image for you and gives the path.
-- **Re-saving the same file** (more annotations, same name) → re-fires; you're not stuck.
-- **Several in a row** → each screenshot has its own path, nothing gets overwritten.
-- **If it crashes** → it restarts itself within seconds (see "Stays alive" below).
+- **Copy the same thing again** (Snipping Tool's Copy re-puts the raw image) → re-asserts the path, so it always pastes.
+- **Re-save the same file** (more annotations, same name) → re-fires; you're not stuck.
+- **Several in a row** → each has its own path.
+- **Crashes / sleep / reboot** → it restarts itself within seconds, and on every login (see *Stays alive*).
 
 ## Install (no admin needed)
 
@@ -40,57 +34,84 @@ Take a screenshot and paste — that's the whole setup.
 
 **Uninstall:** right-click `uninstall.ps1` → *Run with PowerShell*.
 
+## Pasting the image instead of the path
+
+By default shotwatch puts **only the path** on the clipboard. That's deliberate: an image on the
+clipboard makes terminals (Rider/Claude) *intermittently paste nothing* instead of the text. Text-only
+is rock-solid for the main job — feeding paths to Claude.
+
+The screenshot is still saved as a **file**, so you can always drag it into an image app. And if you'd
+rather *paste the picture* into image apps or a browser's reverse-image search, change `$ImageMode`
+(see below) — at the cost of flakier terminal paste.
+
+| `$ImageMode` | Claude / terminal | Paint / Discord | Browser search bar |
+| --- | --- | --- | --- |
+| `never` *(default)* | path ✅ | path (drag the file for the image) | path |
+| `both` | path (occasionally flaky) | image | path |
+| `always` | — (can't read it) | image | image |
+| `smart` | path when your IDE is focused | image otherwise | depends on focus |
+
 ## Stays alive (the "supervisor")
 
-There are two small background scripts:
+Two small background scripts:
 
-- **`shotwatch.ps1`** — the *watcher*. The actual worker that watches for screenshots.
+- **`shotwatch.ps1`** — the *watcher*. The actual worker.
 - **`shotwatch-run.ps1`** — the *supervisor*. Its only job is to keep the watcher running: if the
-  watcher ever stops (a rare clipboard hiccup, waking from sleep, etc.), the supervisor relaunches
-  it within a few seconds. The supervisor itself does nothing risky, so it just stays up.
+  watcher ever stops (clipboard hiccup, waking from sleep, etc.), it relaunches it within a few
+  seconds. The supervisor does nothing risky itself, so it stays up.
 
-So a single crash never leaves you stranded — it heals on its own. On login, Windows starts the
-supervisor, the supervisor starts the watcher.
+On login, Windows starts the supervisor, the supervisor starts the watcher. A single crash never
+leaves you stranded.
 
-## How it works (plain version)
+## How it works
 
-Every half-second the watcher quietly checks two things:
+A loop checks two things and puts the path on the clipboard via a sticky re-assert (so Windows' own
+"image copied" can't knock it off):
 
-1. **Your Screenshots folder** — did a new (or re-saved) screenshot appear? If so, it puts that
-   file's path (and the image) on the clipboard.
-2. **The clipboard** — did you just *Copy* an image that isn't a saved file yet (e.g. an annotated
-   snip)? If so, it saves that image to the folder as `clip_<time>.png` and hands you the path.
+1. **Folder watch** — a new or re-saved file in your Screenshots folder.
+2. **Clipboard watch** — an image you *copied* with no file yet (annotated snip → Copy). It saves
+   that image as `clip_<time>.png`, then hands off the path.
 
-It only does this while your editor (Rider by default) is running, so it never messes with your
-clipboard when you're doing unrelated work. And it re-asserts what it put on the clipboard for a
-couple seconds, so Windows' own "image copied" can't knock it off.
+It only acts while your editor (`rider64` by default) is running, so it never touches your clipboard
+during unrelated work. No network, no admin, no compiled binary — just readable PowerShell.
 
-No network. No admin. No compiled binary — just readable PowerShell you can open and check.
+The top of `shotwatch.ps1` has a full `HOW IT WORKS` comment explaining each internal guard.
 
 ## Configure
 
 Edit the **CONFIG** block at the top of `shotwatch.ps1`, then re-run `install.ps1`:
 
 - **`$GuardProcesses`** — only act while one of these apps is running. EXE name without `.exe`.
-  Empty `@()` = always. Examples: `rider64` (Rider), `idea64` (IntelliJ), `pycharm64`,
-  `webstorm64`, `clion64`, `goland64`, `Code` (VS Code), `WindowsTerminal`.
-- **`$ImageMode`** — `both` (default: path + image), `never` (path only — most reliable for
-  terminals), `always` (image only — best for browser search bars, but Claude can't read it),
-  `smart` (path when your editor is focused, image otherwise).
+  `@()` = always. Examples: `rider64` (Rider), `idea64` (IntelliJ), `pycharm64`, `webstorm64`,
+  `clion64`, `goland64`, `Code` (VS Code), `WindowsTerminal`.
+- **`$ImageMode`** — `never` (default, path only), `both`, `always`, `smart` — see the table above.
 - **`$WatchClipboard`** — `true` (default) makes annotate-then-Copy work. `false` = folder only.
-- **`$WatchFolder`** — blank = auto-detect Windows Screenshots folder. Or set a path.
+- **`$WatchFolder`** — blank = auto-detect the Windows Screenshots folder. Or set a path.
+- **`$ClipKeepDays`** — auto-delete shotwatch's own `clip_*.png` after N days (default `1`; `0` = keep
+  forever). Only ever touches files it created.
+- **`$PollMs`** — folder poll interval in ms (default `200`).
 - **`$DebugLog`** — `true` writes `shotwatch.log` next to the script for troubleshooting.
 
 > Tip: `Win+PrtScn` saves a screenshot to the folder. `Win+Shift+S` snips to the clipboard
-> (and Copy-after-annotate is covered too).
+> (annotate-then-Copy is covered too).
 
 ## Optional: bulletproof watchdog (needs admin)
 
-The supervisor covers crashes of the watcher. If you want it to survive *even the supervisor*
-dying or being killed, run **`install-watchdog.ps1` as Administrator** once. It registers a Windows
-Scheduled Task that re-checks every few minutes and relaunches if nothing is running. Totally
-optional — the normal install is already self-healing for everyday use.
+The supervisor covers crashes of the *watcher*. To survive even the *supervisor* being killed, run
+**`install-watchdog.ps1` as Administrator** once — it registers a Windows Scheduled Task that
+relaunches the supervisor if it's ever gone. Optional; the normal install is already self-healing.
+
+## Branches
+
+- **`main`** — the polled version (what `install.ps1` ships). Battle-tested.
+- **`event-clipboard`** — experimental: reacts to clipboard changes via a real
+  `AddClipboardFormatListener` event instead of polling (zero lag). Same logic otherwise. Try it with
+  `git checkout event-clipboard` then re-run `install.ps1`; `git checkout main` + re-run to revert.
 
 ## Requirements
 
 Windows 10/11, Windows PowerShell 5.1 (built in).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
