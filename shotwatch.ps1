@@ -48,11 +48,17 @@ $PollMs       = 200
 #   'always' = image only — best for browsers/search bars/image apps, but Claude can't read it.
 #   'smart'  = path text when a guard/IDE window is in front, image otherwise. Note: capturing
 #              another app to show Claude then fails, since that app is the foreground.
-# Default 'never': an image on the clipboard makes terminals (Rider/Claude) intermittently paste
-# NOTHING instead of the path. Text-only is rock-solid for pasting into Claude — which is the point.
-# The screenshot is still saved as a file you can drag into image apps. Flip to 'both'/'always' if
-# you'd rather paste the picture (and accept flaky terminal paste).
-$ImageMode    = 'never'
+#   'follow' = best of both: keeps the PATH on the clipboard, but whenever you FOCUS an app from
+#              $ImageApps (Discord/browser/Paint...) it swaps to the IMAGE so you paste the picture,
+#              and swaps back to the path when you focus your IDE. The paste target decides.
+# Default 'follow': reliable path for Claude, real image for chats/image apps — no manual switching.
+$ImageMode    = 'follow'
+
+# Apps that accept pasted IMAGES. In 'follow' mode, focusing one of these swaps the clipboard to the
+# picture (and focusing anything else swaps back to the path). EXE name without ".exe".
+$ImageApps = @('Discord','chrome','msedge','firefox','brave','opera','slack','Teams','ms-teams',
+               'WhatsApp','Telegram','Signal','mspaint','PaintDotNet','Photoshop','Gimp','figma',
+               'Notion','olk','Thunderbird','Spark','Obsidian','blender','UnrealEditor')
 
 # Also watch the CLIPBOARD for images (so "annotate in Snipping Tool, then hit Copy" works even
 # though no file is saved). When a freshly copied image appears that isn't already a recent file,
@@ -138,8 +144,10 @@ function Get-Formats {
     switch ($ImageMode) {
         'both'   { }
         'never'  { $useImage = $false }
+        'follow' { $useImage = $false }   # base = path; focus-follow swaps to image on demand
         'always' { $useText  = $false }
-        default  { if ($GuardProcesses -contains $fg) { $useImage = $false } else { $useText = $false } }
+        'smart'  { if ($GuardProcesses -contains $fg) { $useImage = $false } else { $useText = $false } }
+        default  { $useImage = $false }   # unknown -> safest (path only)
     }
     return @{ fg = $fg; img = $useImage; txt = $useText }
 }
@@ -229,11 +237,66 @@ $placedHash = ''    # pixel-hash of the image WE put on the clipboard (only in i
 $lastClipSeq = [Fg]::GetClipboardSequenceNumber()
 $ownClips = New-Object System.Collections.Generic.HashSet[string]   # clip_*.png we created ourselves
 $hashToPath = @{}   # pixel-hash -> clip file we already saved for it (so a re-copy re-asserts the path)
+
+# --- 'follow' mode state: the screenshot we're currently offering, and which form is on the clipboard ---
+$activePath = ''      # file of the screenshot currently on the clipboard (path or image form)
+$activeImgHash = ''   # its image's pixel-hash (set when we put the image form on the clipboard)
+$activeMode = ''      # 'text' or 'image' — which form is currently on the clipboard
+$lastFg = ''          # last foreground process we evaluated (so we only act on focus changes)
+
+# 'follow' mode: keep the PATH on the clipboard, but swap to the IMAGE while an $ImageApps window is
+# focused (so chats/image apps paste the picture), and back to the path otherwise. Only swaps when
+# OUR screenshot is still the clipboard content, so it never clobbers something else you copied.
+function Update-FocusFormat {
+    if ($ImageMode -ne 'follow' -or [string]::IsNullOrEmpty($script:activePath)) { return }
+    $fg = Get-ForegroundProc
+    if ($fg -eq $script:lastFg -or $fg -eq '') { return }   # only act on a real focus change
+    $script:lastFg = $fg
+    if (-not (Test-Path $script:activePath)) { $script:activePath = ''; return }
+    if (-not (Test-GuardOpen)) { return }
+
+    # Is our screenshot still what's on the clipboard? (else the user copied something else — leave it)
+    $ours = $false
+    try {
+        if ($script:activeMode -eq 'image') {
+            $ours = ([System.Windows.Forms.Clipboard]::ContainsImage() -and (Get-ClipImageHash) -eq $script:activeImgHash)
+        } else {
+            $ours = ([System.Windows.Forms.Clipboard]::GetText() -eq $script:activePath)
+        }
+    } catch { }
+    if (-not $ours) { return }
+
+    $wantImage = ($ImageApps -contains $fg)
+    if ($wantImage -and $script:activeMode -ne 'image') {
+        Set-ClipboardSticky $script:activePath $true $false | Out-Null
+        $script:activeImgHash = Get-ClipImageHash
+        $script:placedHash = $script:activeImgHash
+        $script:activeMode = 'image'
+        Log "FOCUS->image ($fg)"
+    } elseif (-not $wantImage -and $script:activeMode -ne 'text') {
+        Set-ClipboardSticky $script:activePath $false $true | Out-Null
+        $script:placedHash = ''
+        $script:activeMode = 'text'
+        Log "FOCUS->text ($fg)"
+    }
+}
+
+# Record the screenshot now on the clipboard so 'follow' mode can swap its form on focus changes.
+function Set-Active($path, $fmt) {
+    $script:activePath = $path
+    $script:activeMode = if ($fmt.img) { 'image' } else { 'text' }
+    $script:activeImgHash = $script:placedHash   # '' in text mode; set when an image is placed
+    $script:lastFg = ''                          # force a focus re-evaluation next tick
+}
+
 while ($true) {
     try {
         # Pump the Windows message queue so the OLE clipboard stays healthy in this long-lived
         # STA thread (without this, clipboard ops can go stale after the process sits idle).
         [System.Windows.Forms.Application]::DoEvents()
+
+        # 'follow' mode: swap path<->image on the clipboard as you change focus (cheap; no-op otherwise).
+        Update-FocusFormat
 
         $files = Get-ChildItem -Path $WatchFolder -File -ErrorAction SilentlyContinue |
                  Where-Object { $Extensions -contains $_.Extension } |
@@ -249,6 +312,7 @@ while ($true) {
                     Log ("NEW " + $f.Name + " fg=$($fmt.fg) img=$($fmt.img) txt=$($fmt.txt)")
                     Set-ClipboardSticky $f.FullName $fmt.img $fmt.txt | Out-Null
                     $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
+                    Set-Active $f.FullName $fmt
                 } else {
                     Log ("NEW " + $f.Name + " (skipped, guard closed)")
                 }
@@ -291,6 +355,7 @@ while ($true) {
                             $fmt = Get-Formats
                             Set-ClipboardSticky $path $fmt.img $fmt.txt | Out-Null
                             $placedHash = if ($fmt.img) { Get-ClipImageHash } else { '' }
+                            Set-Active $path $fmt
                         }
                     }
                     $cimg.Dispose()

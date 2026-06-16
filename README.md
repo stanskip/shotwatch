@@ -34,19 +34,24 @@ Take a screenshot and paste — that's the whole setup.
 
 **Uninstall:** right-click `uninstall.ps1` → *Run with PowerShell*.
 
-## Pasting the image instead of the path
+## Path for Claude, image for chats — automatically (`follow` mode)
 
-By default shotwatch puts **only the path** on the clipboard. That's deliberate: an image on the
-clipboard makes terminals (Rider/Claude) *intermittently paste nothing* instead of the text. Text-only
-is rock-solid for the main job — feeding paths to Claude.
+The hard part: a terminal wants the **path**, but a chat (Discord) or image app wants the **picture** —
+and an image sitting on the clipboard makes terminals intermittently paste *nothing*. You can't put
+both and have each work.
 
-The screenshot is still saved as a **file**, so you can always drag it into an image app. And if you'd
-rather *paste the picture* into image apps or a browser's reverse-image search, change `$ImageMode`
-(see below) — at the cost of flakier terminal paste.
+The default **`follow`** mode solves it by reacting to **where you're about to paste**: it keeps the
+**path** on the clipboard, but the instant you focus an app from `$ImageApps` (Discord, browser,
+Paint, Blender…) it swaps to the **image**, and swaps back to the path when you focus your IDE. So
+`Ctrl+V` gives Claude the path and Discord the picture — no manual switching. (It only swaps while
+*your* screenshot is still on the clipboard, so it never clobbers something else you copied.)
 
-| `$ImageMode` | Claude / terminal | Paint / Discord | Browser search bar |
+Other `$ImageMode` values if you prefer fixed behavior:
+
+| `$ImageMode` | Claude / terminal | Discord / image app | Browser search bar |
 | --- | --- | --- | --- |
-| `never` *(default)* | path ✅ | path (drag the file for the image) | path |
+| `follow` *(default)* | path ✅ | image ✅ | image (it's an image app) |
+| `never` | path ✅ | path (drag the file for the image) | path |
 | `both` | path (occasionally flaky) | image | path |
 | `always` | — (can't read it) | image | image |
 | `smart` | path when your IDE is focused | image otherwise | depends on focus |
@@ -84,7 +89,9 @@ Edit the **CONFIG** block at the top of `shotwatch.ps1`, then re-run `install.ps
 - **`$GuardProcesses`** — only act while one of these apps is running. EXE name without `.exe`.
   `@()` = always. Examples: `rider64` (Rider), `idea64` (IntelliJ), `pycharm64`, `webstorm64`,
   `clion64`, `goland64`, `Code` (VS Code), `WindowsTerminal`.
-- **`$ImageMode`** — `never` (default, path only), `both`, `always`, `smart` — see the table above.
+- **`$ImageMode`** — `follow` (default), `never`, `both`, `always`, `smart` — see the table above.
+- **`$ImageApps`** — in `follow` mode, focusing one of these swaps the clipboard to the image (EXE
+  name without `.exe`). Add your chat/image apps here.
 - **`$WatchClipboard`** — `true` (default) makes annotate-then-Copy work. `false` = folder only.
 - **`$WatchFolder`** — blank = auto-detect the Windows Screenshots folder. Or set a path.
 - **`$ClipKeepDays`** — auto-delete shotwatch's own `clip_*.png` after N days (default `1`; `0` = keep
